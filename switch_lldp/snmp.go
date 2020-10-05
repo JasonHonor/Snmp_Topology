@@ -2,12 +2,16 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/gogf/gf/os/gfile"
+
+	"github.com/gogf/gf/frame/g"
 	"github.com/soniah/gosnmp"
 )
 
@@ -22,16 +26,33 @@ var (
 	native_vlan_table map[int]string
 )
 
+type Host struct {
+	Host      string `json:"host"`
+	Community string `json:"community"`
+}
+
 func main() {
-	Ip := []string{"192.168.2.1", "192.168.2.3"}
+	g.Cfg().SetFileName("config.json")
+
+	data := gfile.GetBytes("config.json")
+
+	hosts := []Host{}
+
+	err0 := json.Unmarshal(data, &hosts)
+	if err0 != nil {
+		fmt.Printf("Error:%v\n", err0)
+		return
+	}
+
 	port_table = make(map[int]string)
 	mode_table = make(map[int]string)
 	vlan_table = make(map[int]string)
 	native_vlan_table = make(map[int]string)
 	/*一次進行一個機器*/
-	for i := 0; i < len(Ip); i++ {
+	for _, host := range hosts {
 		/*連線*/
-		gosnmp.Default.Target = Ip[i]
+		gosnmp.Default.Target = host.Host
+		gosnmp.Default.Community = host.Community
 		err := gosnmp.Default.Connect()
 		if err != nil {
 			log.Fatalf("Connect() err:%v", err)
@@ -67,6 +88,7 @@ func main() {
 		/*Native Vlan ID
 		Cisco:	1.3.6.1.4.1.9.9.46.1.6.1.1.5 vlanTrunkPortNativeVlan
 		Juniper:1.3.6.1.2.1.17.7.1.4.5.1.1	dot1qPvid
+		Huawei:1.3.6.1.2.1.17.7.1.4.5.1.1 vlanTrunkPortNativeVlan
 		*/
 		oids = []string{"1.3.6.1.4.1.9.9.46.1.6.1.1.5", "1.3.6.1.2.1.17.7.1.4.5.1.1"}
 		switch switch_name {
@@ -86,7 +108,9 @@ func main() {
 
 		/*vlan access or trunk
 		Cisco:1.3.6.1.4.1.9.9.46.1.6.1.1.14 		TrunkPortDynamicStatus
-		Juniper:1.3.6.1.4.1.2636.3.40.1.5.1.7.1.5.3 jnxExVlanPortAccessMode*/
+		Juniper:1.3.6.1.4.1.2636.3.40.1.5.1.7.1.5.3 jnxExVlanPortAccessMode
+		Huawei: not found
+		*/
 
 		/*Cisco trunk 通過的 vlan，因為 Cisco 設定為 trunk mode 之後，就不會再任一個 vlan 當中出現，與 Juniper 	trunk 同時出現在很多個 vlan 不同故要額外實作一個找出其通過vlan的方法*/
 
@@ -109,7 +133,10 @@ func main() {
 		必須分開時做，用前面儲存的 switch_name 進行判別式，區分出兩種機器實作，同時若 mode
 		為 trunk，cisco 則會在 TrunkPortDynamicStatus 做完
 		1.3.6.1.4.1.9.9.68.1.2.2.1.2		vmVlan
-		1.3.6.1.4.1.2636.3.40.1.5.1.7.1.3	jnxExVlanPortStatus*/
+		1.3.6.1.4.1.2636.3.40.1.5.1.7.1.3	jnxExVlanPortStatus
+		Huawei:Not found.
+		*/
+
 		oids = []string{"1.3.6.1.4.1.9.9.68.1.2.2.1.2", "1.3.6.1.4.1.2636.3.40.1.5.1.7.1.3"}
 		if switch_name == "Cisco" {
 			err = gosnmp.Default.Walk(oids[0], vmVlan)
@@ -195,7 +222,7 @@ func TrunkPortDynamicStatus(pdu gosnmp.SnmpPDU) error {
 		故 0110 則為 vlan2 vlan3 為接通著，第28位為1->0001 故 4*27+3=111，
 		故還有 vlan111
 		*/
-		hex_value := hex.EncodeToString(v.Value.([]uint8))
+		hex_value := hex.EncodeToString([]byte(v.Value.(string)))
 		for i := 0; i < 32*8; i++ {
 			if string(hex_value[i]) == "0" {
 				continue
@@ -227,9 +254,10 @@ func ifDescr(ifindex string) int {
 		log.Fatalf("Get() err: %v", err)
 	}
 	for _, v := range result.Variables {
-		s := strings.Split(string(v.Value.([]byte)), "/") //取得port號
+		s := strings.Split(string(v.Value.(string)), "/") //取得port號
 		/*Juniper ge-0/0/1.0
-		Cisco  GigabitEthernet0/1*/
+		Cisco  GigabitEthernet0/1
+		Huawei GigabitEthernet0/0/1 */
 		if switch_name == "Juniper" {
 			juniper_s := strings.Split(s[len(s)-1], ".") //去掉 .0 (e.g. 14.0 -> 14)
 			port_nu, err := strconv.Atoi(juniper_s[0])
@@ -258,6 +286,7 @@ func ifDescr(ifindex string) int {
 /*
 dot1dBasePortIfIndex 1.3.6.1.2.1.17.1.4.1.2
 Juniper 用 IEEE 802.1D -> IfIndex
+Huawei 1.3.6.1.2.1.17.1.4.1.2
 */
 func dot1dBasePortIfIndex(dot1d string) string {
 	oid := []string{"1.3.6.1.2.1.17.1.4.1.2." + dot1d}
@@ -275,6 +304,7 @@ func dot1dBasePortIfIndex(dot1d string) string {
 /*
 jnxExVlanName 1.3.6.1.4.1.2636.3.40.1.5.1.5.1.2
 Juniper 用 將 vlan index -> vlan_name
+Huawei: not found
 */
 func jnxExVlanName(index string) string {
 	oid := []string{"1.3.6.1.4.1.2636.3.40.1.5.1.5.1.2." + index}
@@ -319,7 +349,7 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 	1.3.6.1.2.1.2.2.1.2 ifDescr
 	*/
 	if switch_name == "Cisco" {
-		port_table[i] = port_table[i] + " " + string(pdu.Value.([]byte))
+		port_table[i] = port_table[i] + " " + string(pdu.Value.(string))
 	} else {
 		/*Juniper
 		查閱 Juniper ifindex
@@ -329,7 +359,7 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 		if oid[10] == "8" {
 			port_table[i] = port_table[i] + "\t" + string(pdu.Value.([]byte))
 		} else {
-			s := strings.Split(string(pdu.Value.([]byte)), ".")
+			s := strings.Split(string(pdu.Value.(string)), ".")
 			port_table[i] = port_table[i] + " " + s[0]
 		}
 	}
@@ -340,8 +370,8 @@ func set_port_table(pdu gosnmp.SnmpPDU) error {
 func printswitchDescr(pdu gosnmp.SnmpPDU) error {
 	switch pdu.Type {
 	case gosnmp.OctetString:
-		b := pdu.Value.([]byte)
-		s := strings.Split(string(pdu.Value.([]byte)), " ")
+		b := pdu.Value.(string)
+		s := strings.Split(string(pdu.Value.(string)), " ")
 		switch_name = s[0] //儲存swtich name
 		fmt.Printf("%s\n", string(b))
 	default:
@@ -372,7 +402,7 @@ func portCount(pdu gosnmp.SnmpPDU) error {
 	if switch_name == "Juniper" {
 		port_no++
 	} else {
-		value := strings.Split(string(pdu.Value.([]byte)), "/")
+		value := strings.Split(string(pdu.Value.(string)), "/")
 		if strings.Contains(value[0], "Gi") {
 			port_no++
 		}
